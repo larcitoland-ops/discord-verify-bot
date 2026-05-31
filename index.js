@@ -30,36 +30,8 @@ const app = express();
 keepAlive(app);
 
 const fs2 = require('fs');
-const nodePath = require('path');
-const PENDING_PATH = nodePath.join(__dirname, 'pending.json');
 
-function getPending(userId) {
-  try {
-    if (!fs2.existsSync(PENDING_PATH)) return null;
-    const data = JSON.parse(fs2.readFileSync(PENDING_PATH, 'utf-8'));
-    const entry = data[userId];
-    if (!entry) return null;
-    // Expire after 15 minutes
-    if (Date.now() - entry.timestamp > 15 * 60 * 1000) { deletePending(userId); return null; }
-    return entry;
-  } catch { return null; }
-}
-function setPending(userId, data) {
-  try {
-    let all = {};
-    if (fs2.existsSync(PENDING_PATH)) all = JSON.parse(fs2.readFileSync(PENDING_PATH, 'utf-8'));
-    all[userId] = { ...data, timestamp: Date.now() };
-    fs2.writeFileSync(PENDING_PATH, JSON.stringify(all, null, 2));
-  } catch (e) { console.error('setPending error:', e.message); }
-}
-function deletePending(userId) {
-  try {
-    if (!fs2.existsSync(PENDING_PATH)) return;
-    let all = JSON.parse(fs2.readFileSync(PENDING_PATH, 'utf-8'));
-    delete all[userId];
-    fs2.writeFileSync(PENDING_PATH, JSON.stringify(all, null, 2));
-  } catch {}
-}
+
 
 // ─────────────────────────────────────────────
 //  SLASH COMMANDS
@@ -314,16 +286,14 @@ client.on("interactionCreate", async (interaction) => {
     const buttonConfig = embedConfig.buttons.find((b) => b.customId === buttonCustomId);
     if (!buttonConfig) return;
 
-    // Stocker la vérification en attente
-    setPending(interaction.user.id, {
-      guildId: interaction.guildId,
-      channelId: interaction.channelId,
+    const stateData = Buffer.from(JSON.stringify({
       buttonCustomId,
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
       requiredRoleId: buttonConfig.requiredRoleId,
       rewardRoleIds: buttonConfig.rewardRoleIds,
-    });
-
-    const oauthUrl = buildOAuthUrl(buttonCustomId, interaction.user.id);
+    })).toString('base64');
+    const oauthUrl = buildOAuthUrl(stateData);
 
     await interaction.reply({
       content: `🔐 **Vérification requise**\n\nClique sur le lien ci-dessous pour t'authentifier avec Discord.\nNous vérifierons ton rôle sur le serveur source, sans que le bot y soit présent.\n\n🔗 [Cliquez ici pour vous vérifier](${oauthUrl})\n\n*Le lien expire dans 10 minutes.*`,
@@ -342,18 +312,19 @@ app.get("/callback", async (req, res) => {
     return res.send(htmlPage("❌ Erreur", "Paramètres manquants.", false));
   }
 
-  // state = "buttonCustomId:userId"
-  const [buttonCustomId, userId] = state.split(":");
-
-  if (!userId || getPending(userId) === null) {
-    return res.send(htmlPage("❌ Session expirée", "Retourne sur Discord et réessaie.", false));
+  let pending;
+  try {
+    pending = JSON.parse(Buffer.from(state, 'base64').toString('utf-8'));
+  } catch(e) {
+    return res.send(htmlPage('❌ Erreur', 'State invalide.', false));
+  }
+  const { buttonCustomId, userId, guildId, requiredRoleId, rewardRoleIds } = pending;
+  if (!userId || !guildId) {
+    return res.send(htmlPage('❌ Erreur', 'Paramètres manquants.', false));
   }
 
-  const pending = getPending(userId);
-  deletePending(userId);
-
   console.log(`[OAuth] Callback reçu pour userId=${userId} bouton=${buttonCustomId}`);
-  console.log(`[OAuth] Rôle requis: ${pending.requiredRoleId} | Rôles à donner: ${pending.rewardRoleIds}`);
+  console.log(`[OAuth] Rôle requis: ${requiredRoleId} | Rôles à donner: ${rewardRoleIds}`);
 
   try {
     // 1. Échange code → access_token
@@ -379,15 +350,15 @@ app.get("/callback", async (req, res) => {
     }
 
     // 4. Vérifie le rôle requis
-    console.log(`[OAuth] Vérification rôle requis ${pending.requiredRoleId} dans [${member.roles.join(", ")}]`);
-    if (!member.roles.includes(pending.requiredRoleId)) {
+    console.log(`[OAuth] Vérification rôle requis ${requiredRoleId} dans [${member.roles.join(", ")}]`);
+    if (!member.roles.includes(requiredRoleId)) {
       console.log(`[OAuth] ❌ Rôle requis absent`);
       return res.send(htmlPage("❌ Rôle manquant", `Tu n'as pas le rôle requis sur le serveur source.`, false));
     }
     console.log(`[OAuth] ✅ Rôle requis trouvé`);
 
     // 5. Attribue les rôles sur le serveur B
-    const guild = client.guilds.cache.get(pending.guildId);
+    const guild = client.guilds.cache.get(guildId);
     console.log(`[OAuth] Serveur B trouvé: ${guild ? guild.name : "INTROUVABLE"}`);
     if (!guild) return res.send(htmlPage("❌ Erreur", "Serveur introuvable.", false));
 
@@ -397,7 +368,7 @@ app.get("/callback", async (req, res) => {
       return res.send(htmlPage("❌ Introuvable", "Tu n'es pas membre de ce serveur Discord.", false));
     }
 
-    const rolesToAdd = pending.rewardRoleIds
+    const rolesToAdd = rewardRoleIds
       .map((id) => { const r = guild.roles.cache.get(id); console.log(`[OAuth] Rôle ${id}: ${r ? r.name : "INTROUVABLE"}`); return r; })
       .filter(Boolean);
 
