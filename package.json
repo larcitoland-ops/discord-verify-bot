@@ -1,0 +1,15 @@
+{
+  "name": "discord-verify-bot",
+  "version": "1.0.0",
+  "description": "Cross-server role verification bot via OAuth2",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "express": "^4.18.2",
+    "axios": "^1.6.7",
+    "dotenv": "^16.4.1"
+  }
+}
