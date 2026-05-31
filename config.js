@@ -25,7 +25,7 @@ module.exports = {
       rewardRoleIds: ["1510710434158739637", "1510711400388100218"],
     },
     {
-      name: "Admin",
+      name: "Administrateur",
       requiredRoleId: "1510657801758707892",
       rewardRoleIds: ["1510710452848562256", "1510712218549751970", "1510710313438281799"],
     },
