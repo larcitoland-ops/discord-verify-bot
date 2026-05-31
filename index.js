@@ -323,13 +323,19 @@ app.get("/callback", async (req, res) => {
   const pending = pendingVerifications.get(userId);
   pendingVerifications.delete(userId);
 
+  console.log(`[OAuth] Callback reçu pour userId=${userId} bouton=${buttonCustomId}`);
+  console.log(`[OAuth] Rôle requis: ${pending.requiredRoleId} | Rôles à donner: ${pending.rewardRoleIds}`);
+
   try {
     // 1. Échange code → access_token
     const tokenData = await exchangeCode(code);
+    console.log(`[OAuth] Token échangé avec succès`);
 
-    // 2. Vérifie l'identité (sécurité : s'assurer que c'est bien le bon user)
+    // 2. Vérifie l'identité
     const discordUser = await getUser(tokenData.access_token);
+    console.log(`[OAuth] Utilisateur identifié: ${discordUser.username} (${discordUser.id})`);
     if (discordUser.id !== userId) {
+      console.log(`[OAuth] ❌ Identité non concordante: ${discordUser.id} !== ${userId}`);
       return res.send(htmlPage("❌ Erreur", "Identité non concordante.", false));
     }
 
@@ -337,47 +343,42 @@ app.get("/callback", async (req, res) => {
     let member;
     try {
       member = await getMemberInGuild(tokenData.access_token, process.env.SOURCE_GUILD_ID);
+      console.log(`[OAuth] Rôles sur serveur A: ${member.roles.join(", ")}`);
     } catch (err) {
-      return res.send(
-        htmlPage(
-          "❌ Non membre",
-          "Tu ne fais pas partie du serveur source. Rejoins-le d'abord.",
-          false
-        )
-      );
+      console.log(`[OAuth] ❌ Pas membre du serveur A: ${err.response?.status} ${err.response?.data?.message}`);
+      return res.send(htmlPage("❌ Non membre", "Tu ne fais pas partie du serveur source. Rejoins-le d'abord.", false));
     }
 
     // 4. Vérifie le rôle requis
+    console.log(`[OAuth] Vérification rôle requis ${pending.requiredRoleId} dans [${member.roles.join(", ")}]`);
     if (!member.roles.includes(pending.requiredRoleId)) {
-      return res.send(
-        htmlPage(
-          "❌ Rôle manquant",
-          `Tu n'as pas le rôle requis sur le serveur source.`,
-          false
-        )
-      );
+      console.log(`[OAuth] ❌ Rôle requis absent`);
+      return res.send(htmlPage("❌ Rôle manquant", `Tu n'as pas le rôle requis sur le serveur source.`, false));
     }
+    console.log(`[OAuth] ✅ Rôle requis trouvé`);
 
     // 5. Attribue les rôles sur le serveur B
     const guild = client.guilds.cache.get(pending.guildId);
+    console.log(`[OAuth] Serveur B trouvé: ${guild ? guild.name : "INTROUVABLE"}`);
     if (!guild) return res.send(htmlPage("❌ Erreur", "Serveur introuvable.", false));
 
     const targetMember = await guild.members.fetch(userId).catch(() => null);
+    console.log(`[OAuth] Membre cible: ${targetMember ? targetMember.user.username : "INTROUVABLE"}`);
     if (!targetMember) {
-      return res.send(
-        htmlPage("❌ Introuvable", "Tu n'es pas membre de ce serveur Discord.", false)
-      );
+      return res.send(htmlPage("❌ Introuvable", "Tu n'es pas membre de ce serveur Discord.", false));
     }
 
     const rolesToAdd = pending.rewardRoleIds
-      .map((id) => guild.roles.cache.get(id))
+      .map((id) => { const r = guild.roles.cache.get(id); console.log(`[OAuth] Rôle ${id}: ${r ? r.name : "INTROUVABLE"}`); return r; })
       .filter(Boolean);
 
+    console.log(`[OAuth] Rôles à ajouter: ${rolesToAdd.map(r => r.name).join(", ")}`);
     if (rolesToAdd.length === 0) {
       return res.send(htmlPage("⚠️ Erreur config", "Les rôles configurés sont introuvables. Contacte un admin.", false));
     }
 
     await targetMember.roles.add(rolesToAdd);
+    console.log(`[OAuth] ✅ Rôles ajoutés avec succès`);
 
     return res.send(
       htmlPage(
