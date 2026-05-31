@@ -261,11 +261,16 @@ client.on("interactionCreate", async (interaction) => {
           ephemeral: true,
         });
       }
-      await interaction.deferReply({ ephemeral: true });
-      const msgId = await sendOrUpdateEmbed(interaction.channel, embedConfig);
-      embedConfig.messageId = msgId;
-      setEmbedConfig(channelId, embedConfig);
-      await interaction.editReply({ content: "✅ Embed posté !" });
+      try {
+        await interaction.reply({ content: "⏳ Posting l'embed...", ephemeral: true });
+        const msgId = await sendOrUpdateEmbed(interaction.channel, embedConfig);
+        embedConfig.messageId = msgId;
+        setEmbedConfig(channelId, embedConfig);
+        await interaction.editReply({ content: "✅ Embed posté !" });
+      } catch (err) {
+        console.error("[actualiser-embed] Erreur:", err.message);
+        try { await interaction.editReply({ content: "❌ Erreur lors du post de l'embed. Vérifie les permissions du bot dans ce salon." }); } catch (_) {}
+      }
     }
   }
 
