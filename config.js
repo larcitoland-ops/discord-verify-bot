@@ -46,7 +46,7 @@ module.exports = {
     },
     {
       name: "Responsable Helper/Support",
-      requiredRoleId: "1510657806670368963",
+      requiredRoleId: "1510657805311545485",
       rewardRoleIds: ["1510711561768145006", "1510712218549751970"],
     },
     {
