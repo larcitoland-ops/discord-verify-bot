@@ -2,19 +2,14 @@ require("dotenv").config();
 const {
   Client,
   GatewayIntentBits,
-  REST,
-  Routes,
-  SlashCommandBuilder,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  PermissionFlagsBits,
 } = require("discord.js");
 const express = require("express");
-const { keepAlive } = require("./keep_alive");
-const { buildOAuthUrl, exchangeCode, getMemberInGuild, getUser } = require("./oauth");
-const { getEmbedConfig, setEmbedConfig, getAllEmbeds } = require("./config");
+const axios = require("axios");
+const CONFIG = require("./config");
 
 // ─────────────────────────────────────────────
 //  CLIENT DISCORD
@@ -24,428 +19,222 @@ const client = new Client({
 });
 
 // ─────────────────────────────────────────────
-//  SERVEUR EXPRESS (OAuth2 callback + keep_alive)
+//  EXPRESS (keep-alive + OAuth2 callback)
 // ─────────────────────────────────────────────
 const app = express();
-keepAlive(app);
+const PORT = process.env.PORT || 3000;
 
-const fs2 = require('fs');
-
-
-
-// ─────────────────────────────────────────────
-//  SLASH COMMANDS
-// ─────────────────────────────────────────────
-const commands = [
-  // /config-embed : crée/modifie un embed avec boutons dans un salon
-  new SlashCommandBuilder()
-    .setName("config-embed")
-    .setDescription("Crée ou modifie l'embed de vérification dans ce salon")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption((o) =>
-      o.setName("titre").setDescription("Titre de l'embed").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("description").setDescription("Description de l'embed").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("couleur")
-        .setDescription("Couleur hex (ex: #5865F2)")
-        .setRequired(false)
-    ),
-
-  // /config-bouton : ajoute un bouton à l'embed du salon
-  new SlashCommandBuilder()
-    .setName("config-bouton")
-    .setDescription("Ajoute un bouton de vérification à l'embed de ce salon")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption((o) =>
-      o.setName("id").setDescription("Identifiant unique du bouton (ex: modo)").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("label").setDescription("Texte du bouton (ex: ✅ Vérifier Modo)").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("role_requis")
-        .setDescription("ID du rôle requis sur le serveur A")
-        .setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("roles_a_donner")
-        .setDescription("IDs des rôles à donner ici, séparés par des virgules")
-        .setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("style")
-        .setDescription("Couleur du bouton")
-        .setRequired(false)
-        .addChoices(
-          { name: "Bleu (Primary)", value: "PRIMARY" },
-          { name: "Gris (Secondary)", value: "SECONDARY" },
-          { name: "Vert (Success)", value: "SUCCESS" },
-          { name: "Rouge (Danger)", value: "DANGER" }
-        )
-    ),
-
-  // /supprimer-bouton : retire un bouton de l'embed
-  new SlashCommandBuilder()
-    .setName("supprimer-bouton")
-    .setDescription("Supprime un bouton de l'embed de ce salon")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addStringOption((o) =>
-      o.setName("id").setDescription("Identifiant du bouton à supprimer").setRequired(true)
-    ),
-
-  // /actualiser-embed : repost l'embed avec les boutons actuels
-  new SlashCommandBuilder()
-    .setName("actualiser-embed")
-    .setDescription("Repost l'embed de vérification dans ce salon")
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-].map((c) => c.toJSON());
+app.get("/", (req, res) => res.send("✅ Bot en ligne !"));
+app.get("/ping", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
 
 // ─────────────────────────────────────────────
-//  ENREGISTREMENT DES COMMANDES
+//  OAUTH2 HELPERS
 // ─────────────────────────────────────────────
-async function registerCommands(guildId) {
-  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
-  try {
-    await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), {
-      body: commands,
-    });
-    console.log(`[Commands] Commandes enregistrées sur le serveur ${guildId}`);
-  } catch (err) {
-    console.error("[Commands] Erreur enregistrement :", err.message);
-  }
+const DISCORD_API = "https://discord.com/api/v10";
+
+function buildOAuthUrl(stateB64) {
+  const params = new URLSearchParams({
+    client_id: process.env.CLIENT_ID,
+    redirect_uri: `${process.env.PUBLIC_URL}/callback`,
+    response_type: "code",
+    scope: "identify guilds.members.read",
+    state: stateB64,
+  });
+  return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 
-// ─────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────
-const BUTTON_STYLES = {
-  PRIMARY: ButtonStyle.Primary,
-  SECONDARY: ButtonStyle.Secondary,
-  SUCCESS: ButtonStyle.Success,
-  DANGER: ButtonStyle.Danger,
-};
-
-function buildEmbed(embedConfig) {
-  const embed = new EmbedBuilder()
-    .setTitle(embedConfig.title)
-    .setDescription(embedConfig.description)
-    .setColor(embedConfig.color || "#5865F2")
-    .setFooter({ text: "Cliquez sur un bouton pour vérifier votre rôle" })
-    .setTimestamp();
-  return embed;
+async function exchangeCode(code) {
+  const params = new URLSearchParams({
+    client_id: process.env.CLIENT_ID,
+    client_secret: process.env.CLIENT_SECRET,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: `${process.env.PUBLIC_URL}/callback`,
+  });
+  const res = await axios.post(`${DISCORD_API}/oauth2/token`, params.toString(), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+  });
+  return res.data;
 }
 
-function buildRows(buttons) {
-  // Discord limite à 5 boutons par ligne et 5 lignes
-  const rows = [];
-  for (let i = 0; i < buttons.length; i += 5) {
-    const row = new ActionRowBuilder();
-    buttons.slice(i, i + 5).forEach((btn) => {
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId(`verify:${btn.customId}`)
-          .setLabel(btn.label)
-          .setStyle(BUTTON_STYLES[btn.style] || ButtonStyle.Primary)
-      );
-    });
-    rows.push(row);
-  }
-  return rows;
+async function getMemberRoles(accessToken) {
+  const res = await axios.get(`${DISCORD_API}/users/@me/guilds/${CONFIG.SOURCE_GUILD_ID}/member`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return res.data.roles; // tableau d'IDs
 }
 
-async function sendOrUpdateEmbed(channel, embedConfig) {
-  const embed = buildEmbed(embedConfig);
-  const rows = buildRows(embedConfig.buttons || []);
-
-  // Si un message existe déjà, on le supprime
-  if (embedConfig.messageId) {
-    try {
-      const old = await channel.messages.fetch(embedConfig.messageId);
-      await old.delete();
-    } catch (_) {}
-  }
-
-  const msg = await channel.send({ embeds: [embed], components: rows });
-  return msg.id;
+async function getUser(accessToken) {
+  const res = await axios.get(`${DISCORD_API}/users/@me`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return res.data;
 }
-
-// ─────────────────────────────────────────────
-//  ÉVÉNEMENTS BOT
-// ─────────────────────────────────────────────
-client.once("ready", () => {
-  console.log(`[Bot] Connecté en tant que ${client.user.tag}`);
-});
-
-client.on("guildCreate", (guild) => {
-  registerCommands(guild.id);
-});
-
-client.on("interactionCreate", async (interaction) => {
-  // ── SLASH COMMANDS ──────────────────────────
-  if (interaction.isChatInputCommand()) {
-    const { commandName, channelId } = interaction;
-
-    // /config-embed
-    if (commandName === "config-embed") {
-      const title = interaction.options.getString("titre");
-      const description = interaction.options.getString("description");
-      const color = interaction.options.getString("couleur") || "#5865F2";
-
-      let existing = getEmbedConfig(channelId) || { buttons: [] };
-      const newConfig = { ...existing, title, description, color };
-      setEmbedConfig(channelId, newConfig);
-
-      await interaction.reply({
-        content: "✅ Embed configuré ! Utilise `/actualiser-embed` pour le poster.",
-        ephemeral: true,
-      });
-    }
-
-    // /config-bouton
-    else if (commandName === "config-bouton") {
-      const id = interaction.options.getString("id").replace(/\s+/g, "_");
-      const label = interaction.options.getString("label");
-      const requiredRoleId = interaction.options.getString("role_requis").trim();
-      const rewardRoleIds = interaction.options
-        .getString("roles_a_donner")
-        .split(",")
-        .map((r) => r.trim());
-      const style = interaction.options.getString("style") || "PRIMARY";
-
-      let embedConfig = getEmbedConfig(channelId);
-      if (!embedConfig) {
-        return interaction.reply({
-          content: "❌ Configure d'abord l'embed avec `/config-embed`.",
-          ephemeral: true,
-        });
-      }
-
-      // Remplace si l'id existe déjà
-      embedConfig.buttons = embedConfig.buttons.filter((b) => b.customId !== id);
-      embedConfig.buttons.push({ customId: id, label, style, requiredRoleId, rewardRoleIds });
-      setEmbedConfig(channelId, embedConfig);
-
-      await interaction.reply({
-        content: `✅ Bouton **${label}** configuré !\n> Rôle requis (serveur A) : \`${requiredRoleId}\`\n> Rôles donnés (ce serveur) : ${rewardRoleIds.map((r) => `\`${r}\``).join(", ")}\n\nUtilise \`/actualiser-embed\` pour mettre à jour l'embed.`,
-        ephemeral: true,
-      });
-    }
-
-    // /supprimer-bouton
-    else if (commandName === "supprimer-bouton") {
-      const id = interaction.options.getString("id");
-      let embedConfig = getEmbedConfig(channelId);
-      if (!embedConfig) {
-        return interaction.reply({ content: "❌ Aucun embed configuré ici.", ephemeral: true });
-      }
-      const before = embedConfig.buttons.length;
-      embedConfig.buttons = embedConfig.buttons.filter((b) => b.customId !== id);
-      if (embedConfig.buttons.length === before) {
-        return interaction.reply({ content: `❌ Bouton \`${id}\` introuvable.`, ephemeral: true });
-      }
-      setEmbedConfig(channelId, embedConfig);
-      await interaction.reply({
-        content: `✅ Bouton \`${id}\` supprimé. Utilise \`/actualiser-embed\` pour mettre à jour.`,
-        ephemeral: true,
-      });
-    }
-
-    // /actualiser-embed
-    else if (commandName === "actualiser-embed") {
-      const embedConfig = getEmbedConfig(channelId);
-      if (!embedConfig || !embedConfig.title) {
-        return interaction.reply({
-          content: "❌ Aucun embed configuré. Utilise `/config-embed` d'abord.",
-          ephemeral: true,
-        });
-      }
-      try {
-        await interaction.reply({ content: "⏳ Posting l'embed...", ephemeral: true });
-        const msgId = await sendOrUpdateEmbed(interaction.channel, embedConfig);
-        embedConfig.messageId = msgId;
-        setEmbedConfig(channelId, embedConfig);
-        await interaction.editReply({ content: "✅ Embed posté !" });
-      } catch (err) {
-        console.error("[actualiser-embed] Erreur:", err.message);
-        try { await interaction.editReply({ content: "❌ Erreur lors du post de l'embed. Vérifie les permissions du bot dans ce salon." }); } catch (_) {}
-      }
-    }
-  }
-
-  // ── BOUTONS ──────────────────────────────────
-  if (interaction.isButton()) {
-    const [prefix, buttonCustomId] = interaction.customId.split(":");
-    if (prefix !== "verify") return;
-
-    const embedConfig = getEmbedConfig(interaction.channelId);
-    if (!embedConfig) return;
-
-    const buttonConfig = embedConfig.buttons.find((b) => b.customId === buttonCustomId);
-    if (!buttonConfig) return;
-
-    const stateData = Buffer.from(JSON.stringify({
-      buttonCustomId,
-      userId: interaction.user.id,
-      guildId: interaction.guildId,
-      requiredRoleId: buttonConfig.requiredRoleId,
-      rewardRoleIds: buttonConfig.rewardRoleIds,
-    })).toString('base64');
-    const oauthUrl = buildOAuthUrl(stateData);
-
-    await interaction.reply({
-      content: `🔐 **Vérification requise**\n\nClique sur le lien ci-dessous pour t'authentifier avec Discord.\nNous vérifierons ton rôle sur le serveur source, sans que le bot y soit présent.\n\n🔗 [Cliquez ici pour vous vérifier](${oauthUrl})\n\n*Le lien expire dans 10 minutes.*`,
-      ephemeral: true,
-    });
-  }
-});
 
 // ─────────────────────────────────────────────
 //  OAUTH2 CALLBACK
 // ─────────────────────────────────────────────
 app.get("/callback", async (req, res) => {
   const { code, state } = req.query;
+  console.log(`[Callback] Reçu — code: ${!!code}, state: ${!!state}`);
 
   if (!code || !state) {
-    return res.send(htmlPage("❌ Erreur", "Paramètres manquants.", false));
+    return res.send(page("❌ Erreur", "Paramètres manquants.", false));
   }
 
-  let pending;
+  // Décode le state (base64 → JSON)
+  let stateData;
   try {
-    pending = JSON.parse(Buffer.from(state, 'base64').toString('utf-8'));
-  } catch(e) {
-    return res.send(htmlPage('❌ Erreur', 'State invalide.', false));
-  }
-  const { buttonCustomId, userId, guildId, requiredRoleId, rewardRoleIds } = pending;
-  if (!userId || !guildId) {
-    return res.send(htmlPage('❌ Erreur', 'Paramètres manquants.', false));
+    stateData = JSON.parse(Buffer.from(state, "base64").toString("utf-8"));
+  } catch (e) {
+    console.log(`[Callback] State invalide: ${e.message}`);
+    return res.send(page("❌ Erreur", "State invalide.", false));
   }
 
-  console.log(`[OAuth] Callback reçu pour userId=${userId} bouton=${buttonCustomId}`);
-  console.log(`[OAuth] Rôle requis: ${requiredRoleId} | Rôles à donner: ${rewardRoleIds}`);
+  const { userId, guildId } = stateData;
+  console.log(`[Callback] userId=${userId} guildId=${guildId}`);
 
   try {
-    // 1. Échange code → access_token
+    // 1. Échange code → token
     const tokenData = await exchangeCode(code);
-    console.log(`[OAuth] Token échangé avec succès`);
+    console.log(`[Callback] Token OK`);
 
     // 2. Vérifie l'identité
     const discordUser = await getUser(tokenData.access_token);
-    console.log(`[OAuth] Utilisateur identifié: ${discordUser.username} (${discordUser.id})`);
+    console.log(`[Callback] User: ${discordUser.username} (${discordUser.id})`);
     if (discordUser.id !== userId) {
-      console.log(`[OAuth] ❌ Identité non concordante: ${discordUser.id} !== ${userId}`);
-      return res.send(htmlPage("❌ Erreur", "Identité non concordante.", false));
+      return res.send(page("❌ Erreur", "Identité non concordante.", false));
     }
 
-    // 3. Récupère le membre sur le serveur A
-    let member;
+    // 3. Récupère les rôles sur le serveur A
+    let memberRoles;
     try {
-      member = await getMemberInGuild(tokenData.access_token, process.env.SOURCE_GUILD_ID);
-      console.log(`[OAuth] Rôles sur serveur A: ${member.roles.join(", ")}`);
+      memberRoles = await getMemberRoles(tokenData.access_token);
+      console.log(`[Callback] Rôles serveur A: ${memberRoles.join(", ")}`);
     } catch (err) {
-      console.log(`[OAuth] ❌ Pas membre du serveur A: ${err.response?.status} ${err.response?.data?.message}`);
-      return res.send(htmlPage("❌ Non membre", "Tu ne fais pas partie du serveur source. Rejoins-le d'abord.", false));
+      console.log(`[Callback] Pas membre serveur A: ${err.response?.status}`);
+      return res.send(page("❌ Non membre", "Tu ne fais pas partie du serveur source.", false));
     }
 
-    // 4. Vérifie le rôle requis
-    console.log(`[OAuth] Vérification rôle requis ${requiredRoleId} dans [${member.roles.join(", ")}]`);
-    if (!member.roles.includes(requiredRoleId)) {
-      console.log(`[OAuth] ❌ Rôle requis absent`);
-      return res.send(htmlPage("❌ Rôle manquant", `Tu n'as pas le rôle requis sur le serveur source.`, false));
-    }
-    console.log(`[OAuth] ✅ Rôle requis trouvé`);
-
-    // 5. Attribue les rôles sur le serveur B
-    const guild = client.guilds.cache.get(guildId);
-    console.log(`[OAuth] Serveur B trouvé: ${guild ? guild.name : "INTROUVABLE"}`);
-    if (!guild) return res.send(htmlPage("❌ Erreur", "Serveur introuvable.", false));
-
-    const targetMember = await guild.members.fetch(userId).catch(() => null);
-    console.log(`[OAuth] Membre cible: ${targetMember ? targetMember.user.username : "INTROUVABLE"}`);
-    if (!targetMember) {
-      return res.send(htmlPage("❌ Introuvable", "Tu n'es pas membre de ce serveur Discord.", false));
-    }
-
-    const rolesToAdd = rewardRoleIds
-      .map((id) => { const r = guild.roles.cache.get(id); console.log(`[OAuth] Rôle ${id}: ${r ? r.name : "INTROUVABLE"}`); return r; })
-      .filter(Boolean);
-
-    console.log(`[OAuth] Rôles à ajouter: ${rolesToAdd.map(r => r.name).join(", ")}`);
-    if (rolesToAdd.length === 0) {
-      return res.send(htmlPage("⚠️ Erreur config", "Les rôles configurés sont introuvables. Contacte un admin.", false));
-    }
-
-    await targetMember.roles.add(rolesToAdd);
-    console.log(`[OAuth] ✅ Rôles ajoutés avec succès`);
-
-    return res.send(
-      htmlPage(
-        "✅ Vérifié !",
-        `Tes rôles ont été attribués avec succès : ${rolesToAdd.map((r) => r.name).join(", ")}`,
-        true
-      )
+    // 4. Trouve toutes les règles qui correspondent
+    const matchedRules = CONFIG.RULES.filter(rule =>
+      memberRoles.includes(rule.requiredRoleId)
     );
+    console.log(`[Callback] Règles trouvées: ${matchedRules.map(r => r.name).join(", ") || "aucune"}`);
+
+    if (matchedRules.length === 0) {
+      return res.send(page("❌ Aucun rôle", "Tu n'as aucun rôle éligible sur le serveur source.", false));
+    }
+
+    // 5. Collecte tous les rôles à donner (sans doublons)
+    const allRoleIds = [...new Set(matchedRules.flatMap(r => r.rewardRoleIds))];
+
+    // 6. Récupère le membre sur le serveur B
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      console.log(`[Callback] Serveur B introuvable: ${guildId}`);
+      return res.send(page("❌ Erreur", "Serveur introuvable.", false));
+    }
+
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member) {
+      return res.send(page("❌ Introuvable", "Tu n'es pas membre de ce serveur.", false));
+    }
+
+    // 7. Attribue les rôles
+    const rolesToAdd = allRoleIds.map(id => guild.roles.cache.get(id)).filter(Boolean);
+    console.log(`[Callback] Rôles à ajouter: ${rolesToAdd.map(r => r.name).join(", ")}`);
+
+    if (rolesToAdd.length === 0) {
+      return res.send(page("⚠️ Erreur config", "Les rôles configurés sont introuvables. Contacte un admin.", false));
+    }
+
+    await member.roles.add(rolesToAdd);
+    console.log(`[Callback] ✅ Rôles ajoutés`);
+
+    const roleNames = matchedRules.map(r => r.name).join(", ");
+    return res.send(page("✅ Vérifié !", `Rôles attribués : ${roleNames}`, true));
+
   } catch (err) {
-    console.error("[OAuth] Erreur :", err.response?.data || err.message);
-    return res.send(htmlPage("❌ Erreur serveur", "Une erreur est survenue. Réessaie.", false));
+    console.error(`[Callback] Erreur: ${err.response?.data?.message || err.message}`);
+    return res.send(page("❌ Erreur serveur", "Une erreur est survenue. Réessaie.", false));
   }
 });
 
 // ─────────────────────────────────────────────
-//  PAGE HTML RÉSULTAT
+//  BOT EVENTS
 // ─────────────────────────────────────────────
-function htmlPage(title, message, success) {
+client.once("clientReady", async () => {
+  console.log(`[Bot] Connecté en tant que ${client.user.tag}`);
+  // Poste l'embed dans tous les salons configurés via variable CHANNEL_ID
+  const channelId = process.env.CHANNEL_ID;
+  if (channelId) {
+    const channel = client.channels.cache.get(channelId);
+    if (channel) await postEmbed(channel);
+  }
+});
+
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isButton()) return;
+  if (interaction.customId !== "verify") return;
+
+  const stateData = Buffer.from(JSON.stringify({
+    userId: interaction.user.id,
+    guildId: interaction.guildId,
+  })).toString("base64");
+
+  const oauthUrl = buildOAuthUrl(stateData);
+
+  await interaction.reply({
+    content: `🔐 **Vérification requise**\n\nClique sur le lien pour t'authentifier avec Discord.\nOn vérifiera tes rôles automatiquement.\n\n🔗 [Cliquez ici pour vous vérifier](${oauthUrl})\n\n*Le lien expire dans 10 minutes.*`,
+    flags: 64, // ephemeral
+  });
+});
+
+// ─────────────────────────────────────────────
+//  POST EMBED
+// ─────────────────────────────────────────────
+async function postEmbed(channel) {
+  const embed = new EmbedBuilder()
+    .setTitle(CONFIG.EMBED.title)
+    .setDescription(CONFIG.EMBED.description)
+    .setColor(CONFIG.EMBED.color)
+    .setFooter({ text: "Vérification automatique • Aucune donnée stockée" })
+    .setTimestamp();
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("verify")
+      .setLabel(CONFIG.EMBED.buttonLabel)
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  // Supprime les anciens messages du bot dans ce salon
+  try {
+    const messages = await channel.messages.fetch({ limit: 20 });
+    const botMessages = messages.filter(m => m.author.id === client.user.id);
+    for (const msg of botMessages.values()) await msg.delete().catch(() => {});
+  } catch (_) {}
+
+  await channel.send({ embeds: [embed], components: [row] });
+  console.log(`[Bot] Embed posté dans #${channel.name}`);
+}
+
+// ─────────────────────────────────────────────
+//  PAGE HTML
+// ─────────────────────────────────────────────
+function page(title, message, success) {
   const color = success ? "#57F287" : "#ED4245";
   const icon = success ? "✅" : "❌";
-  return `<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>${title}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #23272a;
-      font-family: 'Segoe UI', sans-serif;
-      color: #fff;
-    }
-    .card {
-      background: #2c2f33;
-      border-radius: 16px;
-      padding: 48px 40px;
-      text-align: center;
-      max-width: 420px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-      border-top: 4px solid ${color};
-    }
-    .icon { font-size: 56px; margin-bottom: 16px; }
-    h1 { font-size: 24px; margin-bottom: 12px; color: ${color}; }
-    p { color: #b9bbbe; font-size: 15px; line-height: 1.6; }
-    .close { margin-top: 24px; font-size: 13px; color: #72767d; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">${icon}</div>
-    <h1>${title}</h1>
-    <p>${message}</p>
-    <p class="close">Tu peux fermer cette fenêtre et retourner sur Discord.</p>
-  </div>
-</body>
-</html>`;
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>${title}</title><style>*{margin:0;padding:0;box-sizing:border-box}body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#23272a;font-family:'Segoe UI',sans-serif;color:#fff}.card{background:#2c2f33;border-radius:16px;padding:48px 40px;text-align:center;max-width:420px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.4);border-top:4px solid ${color}}.icon{font-size:56px;margin-bottom:16px}h1{font-size:24px;margin-bottom:12px;color:${color}}p{color:#b9bbbe;font-size:15px;line-height:1.6}.close{margin-top:24px;font-size:13px;color:#72767d}</style></head><body><div class="card"><div class="icon">${icon}</div><h1>${title}</h1><p>${message}</p><p class="close">Tu peux fermer cette fenêtre et retourner sur Discord.</p></div></body></html>`;
 }
 
 // ─────────────────────────────────────────────
 //  DÉMARRAGE
 // ─────────────────────────────────────────────
-client.login(process.env.DISCORD_TOKEN).then(() => {
-  // Enregistre les commandes sur tous les serveurs actuels
-  client.guilds.cache.forEach((guild) => registerCommands(guild.id));
+app.listen(PORT, () => {
+  console.log(`[Server] HTTP sur le port ${PORT}`);
+  console.log(`[Server] UptimeRobot → ${process.env.PUBLIC_URL}/ping`);
 });
+
+client.login(process.env.DISCORD_TOKEN);
