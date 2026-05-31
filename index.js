@@ -29,8 +29,37 @@ const client = new Client({
 const app = express();
 keepAlive(app);
 
-// Map temporaire : userId -> { guildId, channelId, interactionToken, buttonCustomId }
-const pendingVerifications = new Map();
+const fs2 = require('fs');
+const nodePath = require('path');
+const PENDING_PATH = nodePath.join(__dirname, 'pending.json');
+
+function getPending(userId) {
+  try {
+    if (!fs2.existsSync(PENDING_PATH)) return null;
+    const data = JSON.parse(fs2.readFileSync(PENDING_PATH, 'utf-8'));
+    const entry = data[userId];
+    if (!entry) return null;
+    // Expire after 15 minutes
+    if (Date.now() - entry.timestamp > 15 * 60 * 1000) { deletePending(userId); return null; }
+    return entry;
+  } catch { return null; }
+}
+function setPending(userId, data) {
+  try {
+    let all = {};
+    if (fs2.existsSync(PENDING_PATH)) all = JSON.parse(fs2.readFileSync(PENDING_PATH, 'utf-8'));
+    all[userId] = { ...data, timestamp: Date.now() };
+    fs2.writeFileSync(PENDING_PATH, JSON.stringify(all, null, 2));
+  } catch (e) { console.error('setPending error:', e.message); }
+}
+function deletePending(userId) {
+  try {
+    if (!fs2.existsSync(PENDING_PATH)) return;
+    let all = JSON.parse(fs2.readFileSync(PENDING_PATH, 'utf-8'));
+    delete all[userId];
+    fs2.writeFileSync(PENDING_PATH, JSON.stringify(all, null, 2));
+  } catch {}
+}
 
 // ─────────────────────────────────────────────
 //  SLASH COMMANDS
@@ -286,7 +315,7 @@ client.on("interactionCreate", async (interaction) => {
     if (!buttonConfig) return;
 
     // Stocker la vérification en attente
-    pendingVerifications.set(interaction.user.id, {
+    setPending(interaction.user.id, {
       guildId: interaction.guildId,
       channelId: interaction.channelId,
       buttonCustomId,
@@ -316,12 +345,12 @@ app.get("/callback", async (req, res) => {
   // state = "buttonCustomId:userId"
   const [buttonCustomId, userId] = state.split(":");
 
-  if (!userId || !pendingVerifications.has(userId)) {
+  if (!userId || getPending(userId) === null) {
     return res.send(htmlPage("❌ Session expirée", "Retourne sur Discord et réessaie.", false));
   }
 
-  const pending = pendingVerifications.get(userId);
-  pendingVerifications.delete(userId);
+  const pending = getPending(userId);
+  deletePending(userId);
 
   console.log(`[OAuth] Callback reçu pour userId=${userId} bouton=${buttonCustomId}`);
   console.log(`[OAuth] Rôle requis: ${pending.requiredRoleId} | Rôles à donner: ${pending.rewardRoleIds}`);
